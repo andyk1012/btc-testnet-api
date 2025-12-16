@@ -9,19 +9,28 @@
 
 import argparse
 import hashlib
-import hmac
 import json
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import requests
 from ecdsa import SECP256k1, SigningKey
 
+# -------------------------
+# Wallet storage location
+# -------------------------
+# Use env var (Render-friendly). Example on Render:
+#   WALLETS_DIR=/var/data/wallets
+WALLETS_DIR = os.environ.get("WALLETS_DIR", "wallets")
+
+# If a relative path is provided, keep it relative to this script folder
 BASE = Path(__file__).resolve().parent
-WALLETS = BASE / "wallets"
+WALLETS = Path(WALLETS_DIR)
+if not WALLETS.is_absolute():
+    WALLETS = (BASE / WALLETS).resolve()
 WALLETS.mkdir(parents=True, exist_ok=True)
 
 API = "https://blockstream.info/testnet/api"
@@ -32,19 +41,24 @@ API = "https://blockstream.info/testnet/api"
 
 ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
+
 def sha256(b: bytes) -> bytes:
     return hashlib.sha256(b).digest()
+
 
 def ripemd160(b: bytes) -> bytes:
     h = hashlib.new("ripemd160")
     h.update(b)
     return h.digest()
 
+
 def hash160(b: bytes) -> bytes:
     return ripemd160(sha256(b))
 
+
 def dsha256(b: bytes) -> bytes:
     return sha256(sha256(b))
+
 
 def b58encode(b: bytes) -> str:
     # leading zeros
@@ -54,6 +68,7 @@ def b58encode(b: bytes) -> str:
             n_zeros += 1
         else:
             break
+
     num = int.from_bytes(b, "big")
     out = bytearray()
     while num > 0:
@@ -62,35 +77,31 @@ def b58encode(b: bytes) -> str:
     out.reverse()
     return (ALPHABET[0:1] * n_zeros + out).decode()
 
+
 def b58check_encode(payload: bytes) -> str:
     chk = dsha256(payload)[:4]
     return b58encode(payload + chk)
 
+
 def varint(n: int) -> bytes:
     if n < 0xfd:
         return bytes([n])
-    if n <= 0xffff:
+    if n <= 0xFFFF:
         return b"\xfd" + n.to_bytes(2, "little")
-    if n <= 0xffffffff:
+    if n <= 0xFFFFFFFF:
         return b"\xfe" + n.to_bytes(4, "little")
     return b"\xff" + n.to_bytes(8, "little")
 
+
 def ser_string(b: bytes) -> bytes:
     return varint(len(b)) + b
+
 
 def privkey_to_wif_testnet(priv: bytes, compressed: bool = True) -> str:
     # testnet WIF prefix 0xEF
     payload = b"\xef" + priv + (b"\x01" if compressed else b"")
     return b58check_encode(payload)
 
-def wif_to_privkey(wif: str) -> Tuple[bytes, bool]:
-    raw = b58decode_check(wif)
-    if raw[0] not in (0xef, 0x80):
-        raise ValueError("Not a WIF key")
-    compressed = len(raw) == 34 and raw[-1] == 0x01
-    if compressed:
-        return raw[1:-1], True
-    return raw[1:], False
 
 def b58decode(s: str) -> bytes:
     num = 0
@@ -100,6 +111,7 @@ def b58decode(s: str) -> bytes:
         if idx == -1:
             raise ValueError("Invalid base58 char")
         num += idx
+
     # leading zeros
     n_zeros = 0
     for ch in s.encode():
@@ -107,8 +119,10 @@ def b58decode(s: str) -> bytes:
             n_zeros += 1
         else:
             break
-    b = num.to_bytes((num.bit_length() + 7)//8, "big") if num else b""
-    return b"\x00"*n_zeros + b
+
+    b = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
+    return b"\x00" * n_zeros + b
+
 
 def b58decode_check(s: str) -> bytes:
     b = b58decode(s)
@@ -119,44 +133,62 @@ def b58decode_check(s: str) -> bytes:
         raise ValueError("Bad checksum")
     return payload
 
+
 def pubkey_from_priv(priv: bytes, compressed: bool = True) -> bytes:
     sk = SigningKey.from_string(priv, curve=SECP256k1)
     vk = sk.get_verifying_key()
     x = vk.pubkey.point.x()
     y = vk.pubkey.point.y()
     x_bytes = x.to_bytes(32, "big")
+
     if not compressed:
         return b"\x04" + x_bytes + y.to_bytes(32, "big")
+
     prefix = b"\x02" if (y % 2 == 0) else b"\x03"
     return prefix + x_bytes
+
 
 def p2pkh_address_testnet(pubkey: bytes) -> str:
     # testnet p2pkh prefix 0x6F
     payload = b"\x6f" + hash160(pubkey)
     return b58check_encode(payload)
 
+
 def scriptpubkey_p2pkh(address: str) -> bytes:
     # decode base58check: version + h160
     payload = b58decode_check(address)
-    if payload[0] not in (0x6f, 0x00):  # testnet/mainnet p2pkh
+    if payload[0] not in (0x6F, 0x00):  # testnet/mainnet p2pkh
         raise ValueError("Not a P2PKH address")
     h160 = payload[1:]
     # OP_DUP OP_HASH160 <20> <h160> OP_EQUALVERIFY OP_CHECKSIG
     return b"\x76\xa9\x14" + h160 + b"\x88\xac"
 
+
 def script_sig_p2pkh(sig_der_plus_hashtype: bytes, pubkey: bytes) -> bytes:
     # <sig> <pubkey>
     return ser_string(sig_der_plus_hashtype) + ser_string(pubkey)
 
+
 def der_sig(r: int, s: int) -> bytes:
     def ser_int(x: int) -> bytes:
-        b = x.to_bytes((x.bit_length()+7)//8 or 1, "big")
+        b = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
         if b[0] & 0x80:
             b = b"\x00" + b
         return b
+
     rb = ser_int(r)
     sb = ser_int(s)
-    return b"\x30" + bytes([2 + len(rb) + 2 + len(sb)]) + b"\x02" + bytes([len(rb)]) + rb + b"\x02" + bytes([len(sb)]) + sb
+    return (
+        b"\x30"
+        + bytes([2 + len(rb) + 2 + len(sb)])
+        + b"\x02"
+        + bytes([len(rb)])
+        + rb
+        + b"\x02"
+        + bytes([len(sb)])
+        + sb
+    )
+
 
 # -------------------------
 # Transaction building
@@ -168,55 +200,61 @@ class UTXO:
     vout: int
     value: int  # satoshis
 
+
 def little_endian_txid(txid_hex: str) -> bytes:
     return bytes.fromhex(txid_hex)[::-1]
 
+
 def tx_serialize(version: int, txins: List[bytes], txouts: List[bytes], locktime: int) -> bytes:
     return (
-        version.to_bytes(4, "little") +
-        varint(len(txins)) + b"".join(txins) +
-        varint(len(txouts)) + b"".join(txouts) +
-        locktime.to_bytes(4, "little")
+        version.to_bytes(4, "little")
+        + varint(len(txins)) + b"".join(txins)
+        + varint(len(txouts)) + b"".join(txouts)
+        + locktime.to_bytes(4, "little")
     )
 
-def txin_serialize(txid: str, vout: int, script_sig: bytes, sequence: int = 0xffffffff) -> bytes:
+
+def txin_serialize(txid: str, vout: int, script_sig: bytes, sequence: int = 0xFFFFFFFF) -> bytes:
     return (
-        little_endian_txid(txid) +
-        vout.to_bytes(4, "little") +
-        ser_string(script_sig) +
-        sequence.to_bytes(4, "little")
+        little_endian_txid(txid)
+        + vout.to_bytes(4, "little")
+        + ser_string(script_sig)
+        + sequence.to_bytes(4, "little")
     )
+
 
 def txout_serialize(value: int, script_pubkey: bytes) -> bytes:
     return value.to_bytes(8, "little") + ser_string(script_pubkey)
 
-def sighash_all_legacy(tx: bytes) -> bytes:
-    return dsha256(tx + (1).to_bytes(4, "little"))  # SIGHASH_ALL = 1
 
 def estimate_vbytes_p2pkh(n_in: int, n_out: int) -> int:
     return 10 + n_in * 148 + n_out * 34
+
 
 def fetch_utxos(address: str) -> List[UTXO]:
     r = requests.get(f"{API}/address/{address}/utxo", timeout=30)
     r.raise_for_status()
     return [UTXO(txid=u["txid"], vout=int(u["vout"]), value=int(u["value"])) for u in r.json()]
 
+
 def broadcast(raw_hex: str) -> str:
     r = requests.post(f"{API}/tx", data=raw_hex, timeout=30)
     r.raise_for_status()
     return r.text.strip()
+
 
 def fee_rate_sat_vb() -> int:
     try:
         r = requests.get(f"{API}/fee-estimates", timeout=20)
         r.raise_for_status()
         est = r.json()
-        for k in ("2","3","5"):
+        for k in ("2", "3", "5"):
             if k in est:
                 return max(1, int(est[k]))
     except Exception:
         pass
     return 5
+
 
 # -------------------------
 # Local wallet storage
@@ -227,15 +265,19 @@ def load_json(path: Path, default):
         return json.loads(path.read_text(encoding="utf-8"))
     return default
 
+
 def save_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
 
+
 def pbkdf2_key(password: str, salt: bytes, rounds: int = 200_000, dklen: int = 32) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds, dklen=dklen)
 
+
 def xor_bytes(a: bytes, b: bytes) -> bytes:
     return bytes(x ^ y for x, y in zip(a, b))
+
 
 def encrypt_secret(secret_bytes: bytes, password: str) -> dict:
     import secrets
@@ -243,7 +285,13 @@ def encrypt_secret(secret_bytes: bytes, password: str) -> dict:
     key = pbkdf2_key(password, salt, dklen=len(secret_bytes))
     ct = xor_bytes(secret_bytes, key)
     mac = hashlib.sha256(salt + ct + password.encode("utf-8")).hexdigest()
-    return {"enc": ct.hex(), "salt": salt.hex(), "mac": mac, "kdf": {"name": "pbkdf2-hmac-sha256", "rounds": 200000}}
+    return {
+        "enc": ct.hex(),
+        "salt": salt.hex(),
+        "mac": mac,
+        "kdf": {"name": "pbkdf2-hmac-sha256", "rounds": 200000},
+    }
+
 
 def decrypt_secret(enc_obj: dict, password: str) -> bytes:
     salt = bytes.fromhex(enc_obj["salt"])
@@ -254,12 +302,15 @@ def decrypt_secret(enc_obj: dict, password: str) -> bytes:
     key = pbkdf2_key(password, salt, dklen=len(ct))
     return xor_bytes(ct, key)
 
+
 def wallet_path(name: str) -> Path:
     return WALLETS / f"btc_testnet_{name}.json"
+
 
 def create_wallet(name: str, password: Optional[str]) -> str:
     if wallet_path(name).exists():
         raise SystemExit(f"Wallet '{name}' already exists.")
+
     priv = os.urandom(32)
     pub = pubkey_from_priv(priv, compressed=True)
     addr = p2pkh_address_testnet(pub)
@@ -272,12 +323,15 @@ def create_wallet(name: str, password: Optional[str]) -> str:
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "note": "REAL Bitcoin TESTNET P2PKH wallet (fund via faucet).",
     }
+
     if password:
         wallet["wif_encrypted"] = encrypt_secret(wif.encode("utf-8"), password)
     else:
         wallet["wif_plain"] = wif
+
     save_json(wallet_path(name), wallet)
     return addr
+
 
 def load_wif(name: str, password: Optional[str]) -> str:
     w = load_json(wallet_path(name), None)
@@ -291,11 +345,13 @@ def load_wif(name: str, password: Optional[str]) -> str:
         return decrypt_secret(w["wif_encrypted"], password).decode("utf-8")
     raise SystemExit("Wallet missing WIF.")
 
+
 def load_address(name: str) -> str:
     w = load_json(wallet_path(name), None)
     if not w:
         raise SystemExit(f"Wallet '{name}' not found.")
     return w["address"]
+
 
 # -------------------------
 # Commands
@@ -307,6 +363,7 @@ def cmd_create(args):
     print(f"Name:    {args.name}")
     print(f"Address: {addr}")
     print("\nFund this address using a testnet faucet, then you can broadcast a real testnet tx.")
+
 
 def cmd_balance(args):
     address = args.address or (load_address(args.wallet) if args.wallet else None)
@@ -321,8 +378,10 @@ def cmd_balance(args):
     print(f"Confirmed:   {confirmed} sat ({confirmed/1e8:.8f} tBTC)")
     print(f"Unconfirmed: {unconf} sat ({unconf/1e8:.8f} tBTC)")
 
+
 def cmd_send(args):
     wif = load_wif(args.from_wallet, args.password)
+
     # decode WIF
     payload = b58decode_check(wif)
     compressed = (len(payload) == 34 and payload[-1] == 0x01)
@@ -362,18 +421,19 @@ def cmd_send(args):
     fee = fr * vbytes
 
     if total_in < amount_sat + fee:
-        raise SystemExit(f"Insufficient funds. total_in={total_in} sat, need={amount_sat+fee} sat (incl fee≈{fee}).")
+        raise SystemExit(
+            f"Insufficient funds. total_in={total_in} sat, need={amount_sat+fee} sat (incl fee={fee})."
+        )
 
     change = total_in - amount_sat - fee
     change_addr = args.change_address or from_address
 
     # Build unsigned tx with empty scriptsigs first
     scriptpk_from = scriptpubkey_p2pkh(from_address)
-    txins = []
-    for u in selected:
-        txins.append(txin_serialize(u.txid, u.vout, b"", 0xffffffff))
+    txins = [txin_serialize(u.txid, u.vout, b"", 0xFFFFFFFF) for u in selected]
 
     txouts = [txout_serialize(amount_sat, scriptpubkey_p2pkh(args.to_address))]
+
     # avoid dust change
     if change >= 600:
         txouts.append(txout_serialize(change, scriptpubkey_p2pkh(change_addr)))
@@ -392,14 +452,15 @@ def cmd_send(args):
         tmp_ins = []
         for j, uu in enumerate(selected):
             script = scriptpk_from if j == idx else b""
-            tmp_ins.append(txin_serialize(uu.txid, uu.vout, script, 0xffffffff))
-        preimage = tx_serialize(version, tmp_ins, txouts, locktime) + (1).to_bytes(4, "little")  # sighash type appended
+            tmp_ins.append(txin_serialize(uu.txid, uu.vout, script, 0xFFFFFFFF))
+
+        preimage = tx_serialize(version, tmp_ins, txouts, locktime) + (1).to_bytes(4, "little")
         z = dsha256(preimage)
 
-        sig = sk.sign_digest(z, sigencode=lambda r,s,order: der_sig(r,s))
+        sig = sk.sign_digest(z, sigencode=lambda r, s, order: der_sig(r, s))
         sig_plus = sig + b"\x01"  # SIGHASH_ALL
         scriptsig = script_sig_p2pkh(sig_plus, pub)
-        final_txins.append(txin_serialize(u.txid, u.vout, scriptsig, 0xffffffff))
+        final_txins.append(txin_serialize(u.txid, u.vout, scriptsig, 0xFFFFFFFF))
 
     raw = tx_serialize(version, final_txins, txouts, locktime)
     raw_hex = raw.hex()
@@ -408,7 +469,7 @@ def cmd_send(args):
     print(f"From:   {from_address}")
     print(f"To:     {args.to_address}")
     print(f"Amount: {amount_sat} sat ({args.amount_btc} tBTC)")
-    print(f"Fee≈    {fee} sat (fee_rate={fr} sat/vB)")
+    print(f"Fee:    {fee} sat (fee_rate={fr} sat/vB)")
     print(f"Change: {change} sat\n")
 
     if args.dry_run:
@@ -422,8 +483,12 @@ def cmd_send(args):
     print(f"TXID: {txid}")
     print("Verify by searching this TXID on a Bitcoin testnet explorer.")
 
+
 def build_parser():
-    p = argparse.ArgumentParser(prog="btc_testnet.py", description="Bitcoin TESTNET tools (Educational, pure python)")
+    p = argparse.ArgumentParser(
+        prog="btc_testnet.py",
+        description="Bitcoin TESTNET tools (Educational, pure python)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("create-wallet", help="Create a Bitcoin TESTNET wallet (P2PKH)")
@@ -448,9 +513,11 @@ def build_parser():
 
     return p
 
+
 def main():
     args = build_parser().parse_args()
     args.func(args)
+
 
 if __name__ == "__main__":
     main()
