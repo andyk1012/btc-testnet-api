@@ -60,3 +60,50 @@ def send(req: SendReq):
         "txid": txid,
         "explorer": f"https://blockstream.info/testnet/tx/{txid}",
     }
+class CreateWalletReq(BaseModel):
+    name: str = Field(..., min_length=1, max_length=32)
+    password: str = Field(..., min_length=1, max_length=128)
+
+@app.post("/btc-testnet/create-wallet")
+def create_wallet(req: CreateWalletReq):
+    cmd = [
+        sys.executable, "btc_testnet.py", "create-wallet",
+        req.name,
+        "--password", req.password
+    ]
+
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    out = (p.stdout or "") + "\n" + (p.stderr or "")
+
+    if p.returncode != 0:
+        raise HTTPException(400, out.strip())
+
+    m = re.search(r"Address:\s*([mn][a-km-zA-HJ-NP-Z1-9]{25,34})", out)
+    if not m:
+        raise HTTPException(500, "Wallet created but address not found in output.")
+
+    return {"wallet": req.name, "address": m.group(1)}
+
+@app.get("/btc-testnet/balance")
+def balance(wallet: str):
+    cmd = [
+        sys.executable, "btc_testnet.py", "balance",
+        "--wallet", wallet
+    ]
+
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    out = (p.stdout or "") + "\n" + (p.stderr or "")
+
+    if p.returncode != 0:
+        raise HTTPException(400, out.strip())
+
+    return {"wallet": wallet, "raw": out.strip()}
+
