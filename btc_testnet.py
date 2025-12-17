@@ -184,6 +184,14 @@ def der_sig(r: int, s: int) -> bytes:
     )
 
 
+# ✅ NEW: enforce LOW-S signatures (standardness policy)
+def der_sig_low_s(r: int, s: int) -> bytes:
+    order = SECP256k1.order
+    if s > order // 2:
+        s = order - s
+    return der_sig(r, s)
+
+
 # -------------------------
 # Transaction building
 # -------------------------
@@ -231,9 +239,11 @@ def fetch_utxos(address: str) -> List[UTXO]:
     return [UTXO(txid=u["txid"], vout=int(u["vout"]), value=int(u["value"])) for u in r.json()]
 
 
+# ✅ UPDATED: show Blockstream error text (instead of generic 400)
 def broadcast(raw_hex: str) -> str:
     r = requests.post(f"{API}/tx", data=raw_hex, timeout=30)
-    r.raise_for_status()
+    if not r.ok:
+        raise SystemExit(f"Broadcast failed ({r.status_code}): {r.text.strip()}")
     return r.text.strip()
 
 
@@ -415,8 +425,6 @@ def cmd_send(args):
     scriptpk_from = scriptpubkey_p2pkh(from_address)
 
     # unsigned inputs (empty scriptsigs)
-    txins = [txin_serialize(u.txid, u.vout, b"", 0xFFFFFFFF) for u in selected]
-
     txouts = [txout_serialize(amount_sat, scriptpubkey_p2pkh(args.to_address))]
 
     # avoid dust change
@@ -440,7 +448,8 @@ def cmd_send(args):
         preimage = tx_serialize(version, tmp_ins, txouts, locktime) + (1).to_bytes(4, "little")
         z = dsha256(preimage)
 
-        sig = sk.sign_digest(z, sigencode=lambda r, s, order: der_sig(r, s))
+        # ✅ UPDATED: LOW-S signing
+        sig = sk.sign_digest(z, sigencode=lambda r, s, order: der_sig_low_s(r, s))
         sig_plus = sig + b"\x01"  # SIGHASH_ALL
         scriptsig = script_sig_p2pkh(sig_plus, pub)
         final_txins.append(txin_serialize(u.txid, u.vout, scriptsig, 0xFFFFFFFF))
